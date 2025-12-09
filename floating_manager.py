@@ -12,7 +12,7 @@ from PyObjCTools import AppHelper
 
 from config import STATUS_ICONS, DEFAULT_WORKING_DIR, PROGRAMS_DIR
 from state import StateManager, Agent
-from iterm_bridge import ITermManager
+from tmux_manager import TmuxManager
 
 
 def show_input_dialog(title: str, message: str, default_text: str = "") -> str | None:
@@ -93,14 +93,14 @@ class AgentManagerDelegate(NSObject):
         if self is None:
             return None
         self.state = StateManager()
-        self.iterm = ITermManager()
+        self.tmux = TmuxManager()
         self.window = None
         self.content_view = None
         self.agent_buttons = []
         self.agents_start_y = 50
         # Activity detection: track text hashes per session
-        self.session_hashes: dict[str, str] = {}  # session_id -> last hash
-        self.session_stable_count: dict[str, int] = {}  # session_id -> consecutive stable polls
+        self.session_hashes: dict[str, str] = {}  # tmux_session -> last hash
+        self.session_stable_count: dict[str, int] = {}  # tmux_session -> consecutive stable polls
         return self
 
     def applicationDidFinishLaunching_(self, notification):
@@ -188,13 +188,18 @@ class AgentManagerDelegate(NSObject):
     def refresh_agents(self):
         """Refresh the agent list display - runs in background thread."""
         def do_refresh():
-            # Get current agents - don't auto-prune as marker detection is unreliable
+            # Get current agents
+            agents = self.state.get_all_agents()
+
+            # Prune agents whose tmux sessions no longer exist
+            valid_sessions = set(self.tmux.list_sessions())
+            self.state.prune_dead_sessions(valid_sessions)
             agents = self.state.get_all_agents()
 
             # Check activity status for each agent
             for agent in agents:
-                session_id = agent.iterm_session_id
-                current_hash = self.iterm.get_session_text_hash(session_id)
+                tmux_session = agent.tmux_session
+                current_hash = self.tmux.get_session_text_hash(tmux_session)
 
                 if current_hash is None:
                     # Session not found - mark as idle
@@ -202,16 +207,16 @@ class AgentManagerDelegate(NSObject):
                     continue
 
                 # Get previous hash
-                prev_hash = self.session_hashes.get(session_id)
+                prev_hash = self.session_hashes.get(tmux_session)
 
                 if prev_hash is None or current_hash != prev_hash:
                     # Text changed - agent is active (outputting)
                     agent.status = "active"
-                    self.session_stable_count[session_id] = 0
+                    self.session_stable_count[tmux_session] = 0
                 else:
                     # Text is the same - increment stable count
-                    count = self.session_stable_count.get(session_id, 0) + 1
-                    self.session_stable_count[session_id] = count
+                    count = self.session_stable_count.get(tmux_session, 0) + 1
+                    self.session_stable_count[tmux_session] = count
 
                     # After 3 consecutive stable polls (~6 seconds), mark as waiting
                     if count >= 3:
@@ -220,7 +225,7 @@ class AgentManagerDelegate(NSObject):
                         agent.status = "active"
 
                 # Update hash
-                self.session_hashes[session_id] = current_hash
+                self.session_hashes[tmux_session] = current_hash
 
             # Update UI on main thread
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
@@ -294,8 +299,8 @@ class AgentManagerDelegate(NSObject):
         # Check if Option key is held
         event = AppKit.NSApp.currentEvent()
         if event and (event.modifierFlags() & AppKit.NSEventModifierFlagOption):
-            # Option-click: close the iTerm tab and remove the agent
-            self.iterm.close_session(agent.iterm_session_id)
+            # Option-click: kill the tmux session and remove the agent
+            self.tmux.kill_session(agent.tmux_session)
             self.state.remove_agent(agent.id)
             self.refresh_agents()
         else:
@@ -304,12 +309,10 @@ class AgentManagerDelegate(NSObject):
 
     @objc.python_method
     def activate_agent(self, agent_id: str):
-        """Bring the agent's iTerm session to front."""
+        """Bring the agent's tmux session to front (opens new iTerm tab if needed)."""
         agent = self.state.get_agent(agent_id)
         if agent:
-            # Try to find and activate the session, but don't remove if not found
-            # The marker may have scrolled off screen - that's OK
-            self.iterm.activate_session(agent.iterm_session_id)
+            self.tmux.activate_session(agent.tmux_session)
 
     def newClaudeSession_(self, sender):
         """Launch a new Claude session."""
@@ -351,14 +354,14 @@ class AgentManagerDelegate(NSObject):
                 return
 
             try:
-                print(f"[DEBUG] Creating iTerm session...")
-                session_id = self.iterm.create_session(agent_type, working_dir)
-                print(f"[DEBUG] Got session_id: {session_id}")
-                if session_id:
+                print(f"[DEBUG] Creating tmux session...")
+                tmux_session = self.tmux.create_session(agent_type, working_dir, name)
+                print(f"[DEBUG] Got tmux_session: {tmux_session}")
+                if tmux_session:
                     agent = Agent.create(
                         name=name,
                         agent_type=agent_type,
-                        iterm_session_id=session_id,
+                        tmux_session=tmux_session,
                         working_dir=working_dir
                     )
                     self.state.add_agent(agent)
@@ -368,7 +371,7 @@ class AgentManagerDelegate(NSObject):
                         "refreshAgentsFromThread:", None, False
                     )
                 else:
-                    print("[DEBUG] session_id is None!")
+                    print("[DEBUG] tmux_session is None!")
             except Exception as e:
                 print(f"[DEBUG] Error creating session: {e}")
                 import traceback

@@ -16,20 +16,22 @@ class Agent:
     id: str
     name: str
     agent_type: str  # "claude" or "gemini"
-    iterm_session_id: str
+    tmux_session: str  # tmux session name (persistent)
     working_dir: str
     status: str  # "active", "idle", "waiting"
     created_at: str
+    # Legacy field for backwards compatibility during migration
+    iterm_session_id: str = ""
 
     @classmethod
-    def create(cls, name: str, agent_type: str, iterm_session_id: str,
+    def create(cls, name: str, agent_type: str, tmux_session: str,
                working_dir: Optional[str] = None) -> "Agent":
         """Create a new agent with generated ID and timestamp."""
         return cls(
             id=str(uuid.uuid4()),
             name=name,
             agent_type=agent_type,
-            iterm_session_id=iterm_session_id,
+            tmux_session=tmux_session,
             working_dir=working_dir or str(Path.home()),
             status="idle",
             created_at=datetime.now().isoformat(),
@@ -40,6 +42,12 @@ class Agent:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Agent":
+        # Handle migration from old format (iterm_session_id -> tmux_session)
+        if "tmux_session" not in data and "iterm_session_id" in data:
+            data["tmux_session"] = data.get("iterm_session_id", "")
+        # Ensure tmux_session exists
+        if "tmux_session" not in data:
+            data["tmux_session"] = ""
         return cls(**data)
 
 
@@ -111,13 +119,20 @@ class StateManager:
         """Get all agents sorted by creation time."""
         return sorted(self.agents.values(), key=lambda a: a.created_at)
 
-    def prune_dead_sessions(self, valid_session_ids: set[str]):
-        """Remove agents whose iTerm sessions no longer exist."""
+    def prune_dead_sessions(self, valid_tmux_sessions: set[str]):
+        """Remove agents whose tmux sessions no longer exist."""
         dead_ids = [
             agent_id for agent_id, agent in self.agents.items()
-            if agent.iterm_session_id not in valid_session_ids
+            if agent.tmux_session not in valid_tmux_sessions
         ]
         for agent_id in dead_ids:
             del self.agents[agent_id]
         if dead_ids:
             self.save()
+
+    def get_agents_by_tmux_session(self, tmux_session: str) -> Optional["Agent"]:
+        """Find an agent by its tmux session name."""
+        for agent in self.agents.values():
+            if agent.tmux_session == tmux_session:
+                return agent
+        return None
