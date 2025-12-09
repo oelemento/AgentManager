@@ -98,6 +98,9 @@ class AgentManagerDelegate(NSObject):
         self.content_view = None
         self.agent_buttons = []
         self.agents_start_y = 50
+        # Activity detection: track text hashes per session
+        self.session_hashes: dict[str, str] = {}  # session_id -> last hash
+        self.session_stable_count: dict[str, int] = {}  # session_id -> consecutive stable polls
         return self
 
     def applicationDidFinishLaunching_(self, notification):
@@ -187,6 +190,37 @@ class AgentManagerDelegate(NSObject):
         def do_refresh():
             # Get current agents - don't auto-prune as marker detection is unreliable
             agents = self.state.get_all_agents()
+
+            # Check activity status for each agent
+            for agent in agents:
+                session_id = agent.iterm_session_id
+                current_hash = self.iterm.get_session_text_hash(session_id)
+
+                if current_hash is None:
+                    # Session not found - mark as idle
+                    agent.status = "idle"
+                    continue
+
+                # Get previous hash
+                prev_hash = self.session_hashes.get(session_id)
+
+                if prev_hash is None or current_hash != prev_hash:
+                    # Text changed - agent is active (outputting)
+                    agent.status = "active"
+                    self.session_stable_count[session_id] = 0
+                else:
+                    # Text is the same - increment stable count
+                    count = self.session_stable_count.get(session_id, 0) + 1
+                    self.session_stable_count[session_id] = count
+
+                    # After 3 consecutive stable polls (~6 seconds), mark as waiting
+                    if count >= 3:
+                        agent.status = "waiting"
+                    else:
+                        agent.status = "active"
+
+                # Update hash
+                self.session_hashes[session_id] = current_hash
 
             # Update UI on main thread
             self.performSelectorOnMainThread_withObject_waitUntilDone_(

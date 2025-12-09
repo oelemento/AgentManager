@@ -199,3 +199,57 @@ class ITermManager:
             except:
                 pass
         return True  # Assume sessions exist if we can't check
+
+    def get_session_text_hash(self, session_id: str) -> Optional[str]:
+        """Get a hash of the last 500 chars of session text for activity detection.
+
+        Returns None if session not found, otherwise returns hash of recent text.
+        """
+        script = f'''
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        try
+                            if unique ID of s is "{session_id}" then
+                                set sessionText to text of s
+                                -- Get last 500 characters to detect changes
+                                if length of sessionText > 500 then
+                                    set sessionText to text -500 thru -1 of sessionText
+                                end if
+                                return sessionText
+                            end if
+                        end try
+                    end repeat
+                end repeat
+            end repeat
+            return "SESSION_NOT_FOUND"
+        end tell
+        '''
+        success, output = run_applescript(script)
+        if not success or output == "SESSION_NOT_FOUND":
+            return None
+        # Return hash of the text
+        import hashlib
+        return hashlib.md5(output.encode()).hexdigest()
+
+    def session_exists(self, session_id: str) -> bool:
+        """Check if a session with this ID still exists."""
+        script = f'''
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        try
+                            if unique ID of s is "{session_id}" then
+                                return true
+                            end if
+                        end try
+                    end repeat
+                end repeat
+            end repeat
+            return false
+        end tell
+        '''
+        success, output = run_applescript(script)
+        return success and output == "true"
