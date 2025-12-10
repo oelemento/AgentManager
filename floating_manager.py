@@ -346,7 +346,7 @@ class AgentManagerDelegate(NSObject):
             self.refresh_agents()
         elif modifiers & AppKit.NSEventModifierFlagCommand and not self.showing_archived:
             # Cmd-click in main view: archive the agent and close iTerm tab
-            self.tmux.detach_session(agent.tmux_session)
+            self.tmux.detach_and_close_tab(agent.tmux_session)
             self.state.archive_agent(agent.id)
             self.refresh_agents()
         elif self.showing_archived:

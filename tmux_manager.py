@@ -136,11 +136,36 @@ class TmuxManager:
         success, _ = run_command(["tmux", "kill-session", "-t", session_name])
         return success
 
-    def detach_session(self, session_name: str) -> bool:
-        """Detach all clients from a tmux session (closes iTerm tabs but keeps session alive)."""
-        # Detach all clients from this session
-        success, _ = run_command(["tmux", "detach-client", "-s", session_name])
-        return success
+    def detach_and_close_tab(self, session_name: str) -> bool:
+        """Detach from tmux session and close the iTerm tab (keeps tmux session alive)."""
+        ensure_iterm_running()
+
+        # Find the iTerm tab showing this tmux session and close it
+        # Search for the session name in terminal text
+        name_part = session_name.replace("agent-", "")
+        short_name = name_part.split("-")[0][:3]
+        search_term = f"agent-{short_name}"
+
+        script = f'''
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        try
+                            set sessionText to text of s
+                            if sessionText contains "{search_term}" then
+                                tell s to close
+                                return true
+                            end if
+                        end try
+                    end repeat
+                end repeat
+            end repeat
+            return false
+        end tell
+        '''
+        success, output = run_applescript(script)
+        return success and output == "true"
 
     def list_sessions(self) -> list[str]:
         """List all agent tmux sessions."""
