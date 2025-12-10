@@ -145,7 +145,15 @@ class StateManager:
         return sum(1 for a in self.agents.values() if not a.archived)
 
     def prune_dead_sessions(self, valid_tmux_sessions: set[str]):
-        """Remove agents whose tmux sessions no longer exist."""
+        """Remove agents whose tmux sessions no longer exist.
+
+        Only prunes if we got a valid response from tmux (non-empty set).
+        This prevents wiping all agents if tmux is temporarily unavailable.
+        """
+        # Don't prune if tmux returned nothing - likely tmux server issue
+        if not valid_tmux_sessions:
+            return
+
         dead_ids = [
             agent_id for agent_id, agent in self.agents.items()
             if agent.tmux_session not in valid_tmux_sessions
