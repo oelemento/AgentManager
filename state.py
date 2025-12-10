@@ -22,6 +22,8 @@ class Agent:
     created_at: str
     # Legacy field for backwards compatibility during migration
     iterm_session_id: str = ""
+    # Archive status - archived agents are hidden from main view
+    archived: bool = False
 
     @classmethod
     def create(cls, name: str, agent_type: str, tmux_session: str,
@@ -115,9 +117,32 @@ class StateManager:
         """Get an agent by ID."""
         return self.agents.get(agent_id)
 
-    def get_all_agents(self) -> list[Agent]:
-        """Get all agents sorted by creation time."""
-        return sorted(self.agents.values(), key=lambda a: a.created_at)
+    def get_all_agents(self, archived: bool = False) -> list[Agent]:
+        """Get all agents sorted by creation time, filtered by archived status."""
+        return sorted(
+            [a for a in self.agents.values() if a.archived == archived],
+            key=lambda a: a.created_at
+        )
+
+    def archive_agent(self, agent_id: str):
+        """Archive an agent (hide from main view but keep tmux session)."""
+        if agent_id in self.agents:
+            self.agents[agent_id].archived = True
+            self.save()
+
+    def unarchive_agent(self, agent_id: str):
+        """Unarchive an agent (restore to main view)."""
+        if agent_id in self.agents:
+            self.agents[agent_id].archived = False
+            self.save()
+
+    def count_archived(self) -> int:
+        """Count number of archived agents."""
+        return sum(1 for a in self.agents.values() if a.archived)
+
+    def count_active(self) -> int:
+        """Count number of non-archived agents."""
+        return sum(1 for a in self.agents.values() if not a.archived)
 
     def prune_dead_sessions(self, valid_tmux_sessions: set[str]):
         """Remove agents whose tmux sessions no longer exist."""

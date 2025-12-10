@@ -136,6 +136,12 @@ class TmuxManager:
         success, _ = run_command(["tmux", "kill-session", "-t", session_name])
         return success
 
+    def detach_session(self, session_name: str) -> bool:
+        """Detach all clients from a tmux session (closes iTerm tabs but keeps session alive)."""
+        # Detach all clients from this session
+        success, _ = run_command(["tmux", "detach-client", "-s", session_name])
+        return success
+
     def list_sessions(self) -> list[str]:
         """List all agent tmux sessions."""
         success, output = run_command([

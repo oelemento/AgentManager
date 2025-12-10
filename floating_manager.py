@@ -101,6 +101,9 @@ class AgentManagerDelegate(NSObject):
         # Activity detection: track text hashes per session
         self.session_hashes: dict[str, str] = {}  # tmux_session -> last hash
         self.session_stable_count: dict[str, int] = {}  # tmux_session -> consecutive stable polls
+        # Archive view toggle
+        self.showing_archived = False
+        self.archive_toggle_btn = None
         return self
 
     def applicationDidFinishLaunching_(self, notification):
@@ -158,7 +161,7 @@ class AgentManagerDelegate(NSObject):
         self.window.makeKeyAndOrderFront_(None)
 
     def create_bottom_buttons(self):
-        """Create the + Claude and + Gemini buttons at bottom."""
+        """Create the + Claude, + Gemini, and Archive toggle buttons at bottom."""
         button_height = 30
         button_width = 120
         margin = 10
@@ -183,18 +186,31 @@ class AgentManagerDelegate(NSObject):
         gemini_btn.setAction_("newGeminiSession:")
         self.content_view.addSubview_(gemini_btn)
 
-        self.agents_start_y = margin + button_height + margin
+        # Archive toggle button (second row)
+        self.archive_toggle_btn = AppKit.NSButton.alloc().initWithFrame_(
+            AppKit.NSMakeRect(margin, margin + button_height + 5, 260, button_height)
+        )
+        self.archive_toggle_btn.setTitle_("Show Archived (0)")
+        self.archive_toggle_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        self.archive_toggle_btn.setTarget_(self)
+        self.archive_toggle_btn.setAction_("toggleArchiveView:")
+        self.content_view.addSubview_(self.archive_toggle_btn)
+
+        self.agents_start_y = margin + button_height + 5 + button_height + margin
 
     def refresh_agents(self):
         """Refresh the agent list display - runs in background thread."""
         def do_refresh():
-            # Get current agents
-            agents = self.state.get_all_agents()
-
             # Prune agents whose tmux sessions no longer exist
             valid_sessions = set(self.tmux.list_sessions())
             self.state.prune_dead_sessions(valid_sessions)
-            agents = self.state.get_all_agents()
+
+            # Get agents based on current view mode
+            agents = self.state.get_all_agents(archived=self.showing_archived)
+
+            # Get counts for toggle button
+            archived_count = self.state.count_archived()
+            active_count = self.state.count_active()
 
             # Check activity status for each agent
             for agent in agents:
@@ -227,22 +243,41 @@ class AgentManagerDelegate(NSObject):
                 # Update hash
                 self.session_hashes[tmux_session] = current_hash
 
-            # Update UI on main thread
+            # Update UI on main thread - pass agents and counts as dict
+            data = {
+                "agents": agents,
+                "archived_count": archived_count,
+                "active_count": active_count
+            }
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "updateAgentList:", agents, False
+                "updateAgentList:", data, False
             )
 
         threading.Thread(target=do_refresh, daemon=True).start()
 
-    def updateAgentList_(self, agents):
+    def updateAgentList_(self, data):
         """Update the agent list UI (must be called on main thread)."""
         # Remove old agent buttons
         for btn in self.agent_buttons:
             btn.removeFromSuperview()
         self.agent_buttons = []
 
-        if agents is None:
+        # Extract data from dict
+        if data is None:
             agents = []
+            archived_count = 0
+            active_count = 0
+        else:
+            agents = data.get("agents", [])
+            archived_count = data.get("archived_count", 0)
+            active_count = data.get("active_count", 0)
+
+        # Update toggle button text
+        if self.archive_toggle_btn:
+            if self.showing_archived:
+                self.archive_toggle_btn.setTitle_(f"Show Active ({active_count})")
+            else:
+                self.archive_toggle_btn.setTitle_(f"Show Archived ({archived_count})")
 
         # Create button for each agent
         row_height = 35
@@ -279,8 +314,8 @@ class AgentManagerDelegate(NSObject):
 
     @objc.python_method
     def get_agent_by_index(self, index):
-        """Get agent by button index."""
-        agents = self.state.get_all_agents()
+        """Get agent by button index (respects current view mode)."""
+        agents = self.state.get_all_agents(archived=self.showing_archived)
         if 0 <= index < len(agents):
             return agents[index]
         return None
@@ -290,22 +325,44 @@ class AgentManagerDelegate(NSObject):
         self.refresh_agents()
 
     def agentClicked_(self, sender):
-        """Handle agent button click. Option-click to remove."""
+        """Handle agent button click.
+
+        Click = switch to agent (or unarchive if viewing archived)
+        Option-click = kill and remove agent
+        Cmd-click = archive agent (only in main view)
+        """
         index = sender.tag()
         agent = self.get_agent_by_index(index)
         if not agent:
             return
 
-        # Check if Option key is held
         event = AppKit.NSApp.currentEvent()
-        if event and (event.modifierFlags() & AppKit.NSEventModifierFlagOption):
+        modifiers = event.modifierFlags() if event else 0
+
+        if modifiers & AppKit.NSEventModifierFlagOption:
             # Option-click: kill the tmux session and remove the agent
             self.tmux.kill_session(agent.tmux_session)
             self.state.remove_agent(agent.id)
             self.refresh_agents()
+        elif modifiers & AppKit.NSEventModifierFlagCommand and not self.showing_archived:
+            # Cmd-click in main view: archive the agent and close iTerm tab
+            self.tmux.detach_session(agent.tmux_session)
+            self.state.archive_agent(agent.id)
+            self.refresh_agents()
+        elif self.showing_archived:
+            # Click in archived view: unarchive, reopen iTerm tab, and switch back to main view
+            self.state.unarchive_agent(agent.id)
+            self.tmux.attach_session(agent.tmux_session)  # Reopen iTerm tab
+            self.showing_archived = False
+            self.refresh_agents()
         else:
-            # Regular click: activate the agent
+            # Regular click in main view: activate the agent
             self.activate_agent(agent.id)
+
+    def toggleArchiveView_(self, sender):
+        """Toggle between active and archived agents view."""
+        self.showing_archived = not self.showing_archived
+        self.refresh_agents()
 
     @objc.python_method
     def activate_agent(self, agent_id: str):
