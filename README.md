@@ -6,15 +6,17 @@ A macOS floating window app for managing multiple Claude and Gemini terminal ses
 
 - **Floating always-on-top window** - Visible across all spaces
 - Launch named Claude/Gemini sessions with one click
-- **Reliable tab switching** - Uses iTerm's persistent session UUID (survives Claude renaming terminal titles)
+- **Persistent sessions via tmux** - Sessions survive closing iTerm tabs/windows and system sleep
+- **Archive agents** - Hide agents from view while keeping sessions alive for later
 - **50% larger font** - Agent sessions open with larger text for readability
-- Option-click to close sessions
+- **Mouse scrolling** - Scroll through session history with trackpad
 - Persists agents between restarts
 
 ## Requirements
 
 - macOS
 - iTerm2
+- tmux (`brew install tmux`)
 - Python 3.11+
 - `claude` and/or `gemini` CLI tools installed
 
@@ -65,9 +67,13 @@ A floating "Agent Manager" window appears in the top-left corner.
 
 Click any agent button to bring its iTerm tab to front.
 
-### Close an agent
+### Archive an agent
 
-**Option-click** on an agent button to close its iTerm tab and remove it from the list.
+**Cmd-click** on an agent button to archive it - hides from the list and closes the iTerm tab, but keeps the tmux session alive. Click "Show Archived" to see archived agents, then click one to restore it.
+
+### Remove an agent
+
+**Option-click** on an agent button to kill the tmux session and remove it permanently.
 
 ### Status indicators
 
@@ -80,8 +86,7 @@ Click any agent button to bring its iTerm tab to front.
 | File | Description |
 |------|-------------|
 | `floating_manager.py` | Main app - PyObjC floating window |
-| `agent_manager.py` | Alternative menu bar version (rumps) |
-| `iterm_bridge.py` | iTerm2 communication via AppleScript |
+| `tmux_manager.py` | tmux session management |
 | `state.py` | Agent data model, JSON persistence |
 | `config.py` | Constants (paths, commands, icons) |
 | `setup_iterm_profile.py` | Creates AgentLarge iTerm profile |
@@ -89,17 +94,21 @@ Click any agent button to bring its iTerm tab to front.
 ## Data locations
 
 - Agent data: `~/.agentmanager/agents.json`
+- tmux config: `~/.tmux.conf` (mouse mode, scrollback)
 - iTerm profile: `~/Library/Preferences/com.googlecode.iterm2.plist`
 
 ## Technical Notes
 
-### Why AppleScript instead of iTerm2 Python API?
+### Why tmux?
 
-The iTerm2 Python API requires running as an iTerm2 script (inside `~/Library/Application Support/iTerm2/Scripts/`). For a standalone app, AppleScript via `osascript` is more reliable.
+Sessions run inside tmux so they persist even if you close the iTerm tab or the whole iTerm window. The agent keeps running and you can reconnect anytime.
 
-### How tab switching works
+### Mouse scrolling in tmux
 
-Claude CLI changes the terminal title (e.g., to "✳ Cultural Tracker (node)"), which breaks name-based tab matching. We use iTerm's `unique ID` property instead - a UUID that's persistent per session and survives title changes.
+The app creates `~/.tmux.conf` with mouse mode enabled. This lets you scroll through session history with your trackpad. If scrolling doesn't work, run:
+```bash
+tmux source-file ~/.tmux.conf
+```
 
 ### Font size
 
