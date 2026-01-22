@@ -75,12 +75,6 @@ Click any agent button to bring its iTerm tab to front.
 
 **Option-click** on an agent button to kill the tmux session and remove it permanently.
 
-### Status indicators
-
-- 🟢 Active
-- ⚪ Idle
-- 🟡 Waiting
-
 ## Files
 
 | File | Description |
@@ -94,10 +88,30 @@ Click any agent button to bring its iTerm tab to front.
 ## Data locations
 
 - Agent data: `~/.agentmanager/agents.json`
+- Session tracking: `~/.agentmanager/sessions/` (conversation IDs for recovery)
 - tmux config: `~/.tmux.conf` (mouse mode, scrollback)
 - iTerm profile: `~/Library/Preferences/com.googlecode.iterm2.plist`
 
+### Environment variables
+
+Each agent session exports `AGENTMANAGER_SESSION={tmux-session-name}`. Claude hooks can use this to write session info (like `conversation_id`) back to `~/.agentmanager/sessions/{session-name}.json` for recovery.
+
 ## Technical Notes
+
+### Session Management
+
+Each agent has a unique UUID that serves two purposes:
+
+1. **Session identification** - Claude agents launch with `--session-id {uuid}`, creating predictable session names
+2. **Session recovery** - If a tmux session dies (system sleep, crash), the agent recovers with `--resume {uuid}`
+
+This eliminates the need to hunt for session IDs when reconnecting. Legacy agents without UUIDs fall back to `--continue {conversation_id}`.
+
+**Status indicators:**
+- 🟢 Active - Agent is outputting text
+- 🟡 Waiting - Agent is idle, waiting for input
+- ⚪ Idle - No activity detected
+- 🔄 Recoverable - tmux session died but can be restored (click to recover)
 
 ### Why tmux?
 
@@ -132,3 +146,10 @@ AppleScript can't directly change font size. We create an "AgentLarge" profile i
 
 - Check if another instance is running: `pkill -f floating_manager.py`
 - Run again
+
+### Agent shows 🔄 but won't recover
+
+- The tmux session died but conversation data was saved
+- Click the agent to attempt recovery
+- If recovery fails, the `conversation_id` may be invalid or Claude session may have expired
+- Option-click to remove and create a fresh agent

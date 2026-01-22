@@ -2,12 +2,40 @@
 
 import json
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from config import DATA_DIR, AGENTS_FILE
+from config import DATA_DIR, AGENTS_FILE, SESSIONS_DIR
+
+
+@dataclass
+class SessionInfo:
+    """Claude session tracking info from the hook."""
+    conversation_id: str = ""
+    transcript_path: str = ""
+    last_tool: Optional[str] = None
+    last_file: Optional[str] = None
+    updated_at: str = ""
+
+    @classmethod
+    def from_file(cls, filepath: Path) -> Optional["SessionInfo"]:
+        """Load session info from a JSON file."""
+        try:
+            if filepath.exists():
+                with open(filepath, "r") as f:
+                    data = json.load(f)
+                return cls(
+                    conversation_id=data.get("conversation_id", ""),
+                    transcript_path=data.get("transcript_path", ""),
+                    last_tool=data.get("last_tool"),
+                    last_file=data.get("last_file"),
+                    updated_at=data.get("updated_at", ""),
+                )
+        except (json.JSONDecodeError, IOError):
+            pass
+        return None
 
 
 @dataclass
@@ -149,15 +177,23 @@ class StateManager:
 
         Only prunes if we got a valid response from tmux (non-empty set).
         This prevents wiping all agents if tmux is temporarily unavailable.
+
+        Agents with saved session info (conversation_id) are KEPT for recovery.
         """
         # Don't prune if tmux returned nothing - likely tmux server issue
         if not valid_tmux_sessions:
             return
 
-        dead_ids = [
-            agent_id for agent_id, agent in self.agents.items()
-            if agent.tmux_session not in valid_tmux_sessions
-        ]
+        dead_ids = []
+        for agent_id, agent in self.agents.items():
+            if agent.tmux_session not in valid_tmux_sessions:
+                # Check if we have session info for recovery
+                session_info = self.get_session_info(agent.tmux_session)
+                if session_info and session_info.conversation_id:
+                    # Keep this agent - it can be recovered
+                    continue
+                dead_ids.append(agent_id)
+
         for agent_id in dead_ids:
             del self.agents[agent_id]
         if dead_ids:
@@ -169,3 +205,14 @@ class StateManager:
             if agent.tmux_session == tmux_session:
                 return agent
         return None
+
+    def get_session_info(self, tmux_session: str) -> Optional[SessionInfo]:
+        """Load Claude session info for a tmux session."""
+        session_file = SESSIONS_DIR / f"{tmux_session}.json"
+        return SessionInfo.from_file(session_file)
+
+    def delete_session_info(self, tmux_session: str):
+        """Delete the session info file for a tmux session."""
+        session_file = SESSIONS_DIR / f"{tmux_session}.json"
+        if session_file.exists():
+            session_file.unlink()

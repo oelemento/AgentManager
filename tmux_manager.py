@@ -4,7 +4,7 @@ import subprocess
 import hashlib
 import time
 from typing import Optional
-from config import AGENT_COMMANDS
+from config import AGENT_COMMANDS, SESSION_ID_SUPPORT
 
 
 def run_command(cmd: list[str], timeout: int = 5) -> tuple[bool, str]:
@@ -50,8 +50,15 @@ class TmuxManager:
     # Prefix for all our tmux sessions
     SESSION_PREFIX = "agent-"
 
-    def create_session(self, agent_type: str, working_dir: str, name: str) -> Optional[str]:
+    def create_session(self, agent_type: str, working_dir: str, name: str,
+                        session_id: Optional[str] = None) -> Optional[str]:
         """Create a new tmux session and launch the agent.
+
+        Args:
+            agent_type: Type of agent (claude, gemini, codex)
+            working_dir: Working directory for the session
+            name: Human-readable name for the session
+            session_id: Optional UUID to use as --session-id for Claude
 
         Returns the tmux session name if successful, None otherwise.
         """
@@ -59,6 +66,10 @@ class TmuxManager:
         session_name = f"{self.SESSION_PREFIX}{name.lower().replace(' ', '-')}-{int(time.time())}"
 
         command = AGENT_COMMANDS.get(agent_type, agent_type)
+
+        # Add --session-id for supported agent types (e.g., Claude)
+        if agent_type in SESSION_ID_SUPPORT and session_id:
+            command = f"{command} --session-id {session_id}"
 
         # Create tmux session in detached mode
         success, _ = run_command([
@@ -71,11 +82,13 @@ class TmuxManager:
         if not success:
             return None
 
-        # Send the agent command to the session
+        # Export environment variable AND launch agent in one command
+        # This ensures AGENTMANAGER_SESSION is inherited by Claude and its hooks
+        full_command = f"export AGENTMANAGER_SESSION={session_name} && {command}"
         run_command([
             "tmux", "send-keys",
             "-t", session_name,
-            command,
+            full_command,
             "Enter"
         ])
 
@@ -238,6 +251,51 @@ class TmuxManager:
         '''
         success, output = run_applescript(script)
         return success and output == "true"
+
+    def recover_session(self, session_name: str, agent_type: str, working_dir: str,
+                        conversation_id: str, agent_id: Optional[str] = None) -> bool:
+        """Recover a dead tmux session by recreating it.
+
+        For Claude agents with agent_id:
+            Primary: claude --resume {agent_id}
+            Fallback: claude --continue {conversation_id}
+
+        For other agents or Claude without agent_id:
+            Uses --continue if conversation_id is available.
+        """
+        command = AGENT_COMMANDS.get(agent_type, agent_type)
+
+        # Create new tmux session with the same name
+        success, _ = run_command([
+            "tmux", "new-session",
+            "-d",  # detached
+            "-s", session_name,
+            "-c", working_dir,
+        ])
+
+        if not success:
+            return False
+
+        # Build the resume command based on agent type and available IDs
+        if agent_type in SESSION_ID_SUPPORT and agent_id:
+            # Primary: use --resume {session-id} for predictable session management
+            command = f"{command} --resume {agent_id}"
+        elif agent_type == "claude" and conversation_id:
+            # Fallback: use --continue for legacy sessions without session_id
+            command = f"{command} --continue {conversation_id}"
+
+        # Export environment variable AND launch agent in one command
+        full_command = f"export AGENTMANAGER_SESSION={session_name} && {command}"
+        run_command([
+            "tmux", "send-keys",
+            "-t", session_name,
+            full_command,
+            "Enter"
+        ])
+
+        # Open iTerm and attach to the session
+        self._open_in_iterm(session_name)
+        return True
 
     def activate_session(self, session_name: str) -> bool:
         """Bring a session to front, opening a new iTerm tab if needed."""

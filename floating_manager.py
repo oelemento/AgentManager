@@ -3,6 +3,7 @@
 
 import subprocess
 import threading
+import uuid
 from pathlib import Path
 
 import objc
@@ -72,7 +73,9 @@ def show_folder_choice_dialog() -> str | None:
                 default_text=""
             )
             if folder_name:
-                return f"{PROGRAMS_DIR}/{folder_name}"
+                new_path = Path(PROGRAMS_DIR) / folder_name
+                new_path.mkdir(parents=True, exist_ok=True)
+                return str(new_path)
             return None
         elif choice == "Custom path...":
             return show_input_dialog(
@@ -161,14 +164,29 @@ class AgentManagerDelegate(NSObject):
         self.window.makeKeyAndOrderFront_(None)
 
     def create_bottom_buttons(self):
-        """Create the + Claude, + Gemini, and Archive toggle buttons at bottom."""
+        """Create the + Claude, + Gemini, + Codex, Archive toggle, and help text at bottom."""
         button_height = 30
-        button_width = 120
+        button_width = 80
         margin = 10
+        y = margin
+
+        # Help text at bottom
+        help_label = AppKit.NSTextField.alloc().initWithFrame_(
+            AppKit.NSMakeRect(margin, y, 260, 36)
+        )
+        help_label.setStringValue_("Click=switch  ⌘-click=archive  ⌥-click=kill\n🔄=recoverable (hover for details)")
+        help_label.setBezeled_(False)
+        help_label.setDrawsBackground_(False)
+        help_label.setEditable_(False)
+        help_label.setSelectable_(False)
+        help_label.setFont_(AppKit.NSFont.systemFontOfSize_(10))
+        help_label.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+        self.content_view.addSubview_(help_label)
+        y += 36
 
         # + Claude button
         claude_btn = AppKit.NSButton.alloc().initWithFrame_(
-            AppKit.NSMakeRect(margin, margin, button_width, button_height)
+            AppKit.NSMakeRect(margin, y, button_width, button_height)
         )
         claude_btn.setTitle_("+ Claude")
         claude_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
@@ -178,7 +196,7 @@ class AgentManagerDelegate(NSObject):
 
         # + Gemini button
         gemini_btn = AppKit.NSButton.alloc().initWithFrame_(
-            AppKit.NSMakeRect(margin + button_width + margin, margin, button_width, button_height)
+            AppKit.NSMakeRect(margin + button_width + 5, y, button_width, button_height)
         )
         gemini_btn.setTitle_("+ Gemini")
         gemini_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
@@ -186,17 +204,29 @@ class AgentManagerDelegate(NSObject):
         gemini_btn.setAction_("newGeminiSession:")
         self.content_view.addSubview_(gemini_btn)
 
+        # + Codex button
+        codex_btn = AppKit.NSButton.alloc().initWithFrame_(
+            AppKit.NSMakeRect(margin + (button_width + 5) * 2, y, button_width, button_height)
+        )
+        codex_btn.setTitle_("+ Codex")
+        codex_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        codex_btn.setTarget_(self)
+        codex_btn.setAction_("newCodexSession:")
+        self.content_view.addSubview_(codex_btn)
+        y += button_height + 5
+
         # Archive toggle button (second row)
         self.archive_toggle_btn = AppKit.NSButton.alloc().initWithFrame_(
-            AppKit.NSMakeRect(margin, margin + button_height + 5, 260, button_height)
+            AppKit.NSMakeRect(margin, y, 260, button_height)
         )
         self.archive_toggle_btn.setTitle_("Show Archived (0)")
         self.archive_toggle_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         self.archive_toggle_btn.setTarget_(self)
         self.archive_toggle_btn.setAction_("toggleArchiveView:")
         self.content_view.addSubview_(self.archive_toggle_btn)
+        y += button_height + margin
 
-        self.agents_start_y = margin + button_height + 5 + button_height + margin
+        self.agents_start_y = y
 
     def refresh_agents(self):
         """Refresh the agent list display - runs in background thread."""
@@ -212,13 +242,30 @@ class AgentManagerDelegate(NSObject):
             archived_count = self.state.count_archived()
             active_count = self.state.count_active()
 
+            # Build session info dict for UI
+            session_infos = {}
+
             # Check activity status for each agent
             for agent in agents:
                 tmux_session = agent.tmux_session
+
+                # Load session info for this agent
+                session_info = self.state.get_session_info(tmux_session)
+                if session_info:
+                    session_infos[agent.id] = session_info
+
+                # Check if tmux session exists
+                if tmux_session not in valid_sessions:
+                    # Session is dead - check if recoverable
+                    if session_info and session_info.conversation_id:
+                        agent.status = "recoverable"
+                    else:
+                        agent.status = "idle"
+                    continue
+
                 current_hash = self.tmux.get_session_text_hash(tmux_session)
 
                 if current_hash is None:
-                    # Session not found - mark as idle
                     agent.status = "idle"
                     continue
 
@@ -247,7 +294,8 @@ class AgentManagerDelegate(NSObject):
             data = {
                 "agents": agents,
                 "archived_count": archived_count,
-                "active_count": active_count
+                "active_count": active_count,
+                "session_infos": session_infos
             }
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "updateAgentList:", data, False
@@ -267,10 +315,12 @@ class AgentManagerDelegate(NSObject):
             agents = []
             archived_count = 0
             active_count = 0
+            session_infos = {}
         else:
             agents = data.get("agents", [])
             archived_count = data.get("archived_count", 0)
             active_count = data.get("active_count", 0)
+            session_infos = data.get("session_infos", {})
 
         # Update toggle button text
         if self.archive_toggle_btn:
@@ -297,6 +347,20 @@ class AgentManagerDelegate(NSObject):
             btn.setTarget_(self)
             btn.setAction_("agentClicked:")
             btn.setTag_(i)  # Use index as tag
+
+            # Add tooltip with session info if available
+            session_info = session_infos.get(agent.id)
+            if session_info:
+                tooltip_parts = []
+                if session_info.last_file:
+                    # Show just filename, not full path
+                    from pathlib import Path
+                    filename = Path(session_info.last_file).name
+                    tooltip_parts.append(f"Last: {filename}")
+                if agent.status == "recoverable":
+                    tooltip_parts.append("Click to restore session")
+                if tooltip_parts:
+                    btn.setToolTip_(" | ".join(tooltip_parts))
 
             self.content_view.addSubview_(btn)
             self.agent_buttons.append(btn)
@@ -366,10 +430,29 @@ class AgentManagerDelegate(NSObject):
 
     @objc.python_method
     def activate_agent(self, agent_id: str):
-        """Bring the agent's tmux session to front (opens new iTerm tab if needed)."""
+        """Bring the agent's tmux session to front, recovering if needed."""
         agent = self.state.get_agent(agent_id)
-        if agent:
+        if not agent:
+            return
+
+        # Check if tmux session still exists
+        if self.tmux.session_exists(agent.tmux_session):
+            # Session alive - just activate it
             self.tmux.activate_session(agent.tmux_session)
+        else:
+            # Session is dead - try to recover
+            # For Claude: uses --session-id --resume (primary) or --continue (fallback)
+            session_info = self.state.get_session_info(agent.tmux_session)
+            conversation_id = session_info.conversation_id if session_info else ""
+
+            print(f"[DEBUG] Recovering session with agent_id: {agent.id}, conversation_id: {conversation_id}")
+            self.tmux.recover_session(
+                agent.tmux_session,
+                agent.agent_type,
+                agent.working_dir,
+                conversation_id,
+                agent_id=agent.id  # Pass agent.id for --session-id
+            )
 
     def newClaudeSession_(self, sender):
         """Launch a new Claude session."""
@@ -384,6 +467,13 @@ class AgentManagerDelegate(NSObject):
         import sys
         sys.stdout.flush()
         self._new_session("gemini")
+
+    def newCodexSession_(self, sender):
+        """Launch a new Codex session."""
+        print("[DEBUG] newCodexSession_ clicked!")
+        import sys
+        sys.stdout.flush()
+        self._new_session("codex")
 
     @objc.python_method
     def _new_session(self, agent_type: str):
@@ -411,15 +501,22 @@ class AgentManagerDelegate(NSObject):
                 return
 
             try:
-                print(f"[DEBUG] Creating tmux session...")
-                tmux_session = self.tmux.create_session(agent_type, working_dir, name)
+                # Generate agent ID upfront so we can use it for --session-id
+                agent_id = str(uuid.uuid4())
+                print(f"[DEBUG] Creating tmux session with agent_id: {agent_id}")
+                tmux_session = self.tmux.create_session(
+                    agent_type, working_dir, name, session_id=agent_id
+                )
                 print(f"[DEBUG] Got tmux_session: {tmux_session}")
                 if tmux_session:
-                    agent = Agent.create(
+                    agent = Agent(
+                        id=agent_id,
                         name=name,
                         agent_type=agent_type,
                         tmux_session=tmux_session,
-                        working_dir=working_dir
+                        working_dir=working_dir,
+                        status="idle",
+                        created_at=__import__("datetime").datetime.now().isoformat()
                     )
                     self.state.add_agent(agent)
                     print(f"[DEBUG] Agent created and saved")
